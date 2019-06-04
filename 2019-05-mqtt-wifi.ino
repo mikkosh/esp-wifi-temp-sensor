@@ -1,3 +1,4 @@
+// https://www.instructables.com/id/ESP8266-Pro-Tips/
 #include <FS.h>                   //this needs to be first, or it all crashes and burns...
 
 #include <ESP8266WiFi.h>          //https://github.com/esp8266/Arduino
@@ -9,10 +10,7 @@
 
 #include <ArduinoJson.h>          //https://github.com/bblanchon/ArduinoJson
 
-//#include <ESP8266mDNS.h>        // included for reset web server
-
 #include <PubSubClient.h>
-#include <ArduinoJson.h>
 
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
@@ -25,27 +23,34 @@ float temperature, humidity, pressure, altitude;
 
 
 WiFiClient espClient;
+
+// MQTT client
 PubSubClient client(espClient);
 
+// For creating the MQTT client id
 const char chars[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
 char id[17];
 
+// This sets the ADC to read Vcc
 ADC_MODE(ADC_VCC);
 
 
-//define your default values here, if there are different values in config.json, they are overwritten.
-//length should be max size + 1
+const char *ap_name = "ESP-SENSOR-AP";
+const char *ap_password = "defaultpass"; // worth changing :)
+
+// define your default values here, they can be changed through config portal
+// length should be max size + 1
 char mqtt_server[40] = "mqtt.beebotte.com";
 char mqtt_port[6] = "1883";
-char mqtt_token[33] = "YOUR_MQTT_AUTH_TOKEN"; // change to: auth token
+char mqtt_token[33] = "YOUR_MQTT_AUTH_TOKEN"; // Note that this is readable in plain text through config portal
 char sleep_seconds[5] = "120";
-char mqtt_channel_prefix[40] = "homeautomation"; // change to: correct channel
+char mqtt_channel_prefix[40] = "homeautomation"; // change to correct channel
 
-//flag for saving data
+// flag for saving data
 bool shouldSaveConfig = false;
 
 
-//callback notifying us of the need to save config
+// callback notifying us of the need to save config
 void saveConfigCallback () {
   Serial.println("Should save config");
   shouldSaveConfig = true;
@@ -54,17 +59,18 @@ void saveConfigCallback () {
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
-  Serial.println();
-
-  if(digitalRead(D6) == HIGH){
-    Serial.println("D6 HIGH: Resetting settings");
-    _resetSettings();
-  }
+  Serial.println("-- APP START --");
   
+  // Turn of wifi to save power until it's needed
+  WiFi.mode( WIFI_OFF );
+  WiFi.forceSleepBegin();
+  delay( 1 );
+    
+  // Uncomment the line below to format storage resetting the settings (do if json format changes)
+  // _resetSettings();
 
   //read configuration from FS json
   Serial.println("mounting FS...");
-
   if (SPIFFS.begin()) {
     
     Serial.println("mounted file system");
@@ -101,96 +107,127 @@ void setup() {
   }
   //end read
 
-
-  // The extra parameters to be configured (can be either global or just in the setup)
-  // After connecting, parameter.getValue() will get you the configured value
-  // id/name placeholder/prompt default length
-  WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server, 40);
-  WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 5);
-  WiFiManagerParameter custom_mqtt_token("token", "mqtt token", mqtt_token, 34);
-  WiFiManagerParameter custom_sleep_seconds("sleepseconds", "sleep seconds", sleep_seconds, 5);
-  WiFiManagerParameter custom_mqtt_channel_prefix("mqtt_channel_prefix", "mqtt channel prefix", mqtt_channel_prefix, 40);
-  //WiFiManager
-  //Local intialization. Once its business is done, there is no need to keep it around
-  WiFiManager wifiManager;
-
-  //set config save notify callback
-  wifiManager.setSaveConfigCallback(saveConfigCallback);
-
-  //add all your parameters here
-  wifiManager.addParameter(&custom_mqtt_server);
-  wifiManager.addParameter(&custom_mqtt_port);
-  wifiManager.addParameter(&custom_mqtt_token);
-  wifiManager.addParameter(&custom_sleep_seconds);
-  wifiManager.addParameter(&custom_mqtt_channel_prefix);
-
-  //sets timeout until configuration portal gets turned off
-  //useful to make it all retry or go to sleep
-  //in seconds
-  wifiManager.setTimeout(120);
-
-  //fetches ssid and pass and tries to connect
-  //if it does not connect it starts an access point with the specified name
-  //here  "AutoConnectAP"
-  //and goes into a blocking loop awaiting configuration
-  if (!wifiManager.autoConnect("ESP-SENSOR-AP")) {
-    Serial.println("failed to connect and hit timeout");
-    delay(3000);
-    //reset and try again, or maybe put it to deep sleep
-    ESP.reset();
-    delay(5000);
-  }
-
-  //if you get here you have connected to the WiFi
-  Serial.println("connected...yeey :)");
-
-  //read updated parameters
-  strcpy(mqtt_server, custom_mqtt_server.getValue());
-  strcpy(mqtt_port, custom_mqtt_port.getValue());
-  strcpy(mqtt_token, custom_mqtt_token.getValue());
-  strcpy(sleep_seconds, custom_sleep_seconds.getValue());
-  strcpy(mqtt_channel_prefix, custom_mqtt_channel_prefix.getValue());
-  
-  //save the custom parameters to FS
-  if (shouldSaveConfig) {
-    Serial.println("saving config");
-    DynamicJsonBuffer jsonBuffer;
-    JsonObject& json = jsonBuffer.createObject();
-    json["mqtt_server"] = mqtt_server;
-    json["mqtt_port"] = mqtt_port;
-    json["mqtt_token"] = mqtt_token;
-    json["sleep_seconds"] = sleep_seconds;
-    json["mqtt_channel_prefix"] = mqtt_channel_prefix;
+  // if pin 6 is high, launch the config portal
+  if(digitalRead(D6) == HIGH){
+    // The extra parameters to be configured (can be either global or just in the setup)
+    // After connecting, parameter.getValue() will get you the configured value
+    // id/name placeholder/prompt default length
+    WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server, 40);
+    WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 5);
+    WiFiManagerParameter custom_mqtt_token("token", "mqtt token", mqtt_token, 34);
+    WiFiManagerParameter custom_sleep_seconds("sleepseconds", "sleep seconds", sleep_seconds, 5);
+    WiFiManagerParameter custom_mqtt_channel_prefix("mqtt_channel_prefix", "mqtt channel prefix", mqtt_channel_prefix, 40);
     
-    File configFile = SPIFFS.open("/config.json", "w");
-    if (!configFile) {
-      Serial.println("failed to open config file for writing");
-    }
-
-    json.prettyPrintTo(Serial);
-    json.printTo(configFile);
-    configFile.close();
-    //end save
-  }
-
-  Serial.println("local ip");
-  Serial.println(WiFi.localIP());
-  Serial.println(WiFi.gatewayIP());
-  Serial.println(WiFi.subnetMask());
-
-  Serial.println(mqtt_server);
-  Serial.println(mqtt_port);
-  Serial.println(mqtt_token);
-  Serial.println(sleep_seconds);
-  Serial.println(mqtt_channel_prefix);
+    //WiFiManager
+    //Local intialization. Once its business is done, there is no need to keep it around
+    WiFiManager wifiManager;
   
-  bme.begin(0x76);
+    //set config save notify callback
+    wifiManager.setSaveConfigCallback(saveConfigCallback);
+  
+    //add all your parameters here
+    wifiManager.addParameter(&custom_mqtt_server);
+    wifiManager.addParameter(&custom_mqtt_port);
+    wifiManager.addParameter(&custom_mqtt_token);
+    wifiManager.addParameter(&custom_sleep_seconds);
+    wifiManager.addParameter(&custom_mqtt_channel_prefix);
+  
+    
+    // starts the configuration portal (and blocks the execution)
+    wifiManager.startConfigPortal(ap_name, ap_password);
+  
+    // if you get here you have connected to the WiFi
+    Serial.println("Connected to WiFi");
+  
+    // read updated parameters
+    strcpy(mqtt_server, custom_mqtt_server.getValue());
+    strcpy(mqtt_port, custom_mqtt_port.getValue());
+    strcpy(mqtt_token, custom_mqtt_token.getValue());
+    strcpy(sleep_seconds, custom_sleep_seconds.getValue());
+    strcpy(mqtt_channel_prefix, custom_mqtt_channel_prefix.getValue());
+    
+    //save the custom parameters to FS
+    if (shouldSaveConfig) {
+      Serial.println("Saving config");
+      DynamicJsonBuffer jsonBuffer;
+      JsonObject& json = jsonBuffer.createObject();
+      json["mqtt_server"] = mqtt_server;
+      json["mqtt_port"] = mqtt_port;
+      json["mqtt_token"] = mqtt_token;
+      json["sleep_seconds"] = sleep_seconds;
+      json["mqtt_channel_prefix"] = mqtt_channel_prefix;
+      
+      File configFile = SPIFFS.open("/config.json", "w");
+      if (!configFile) {
+        Serial.println("failed to open config file for writing");
+      }
+  
+      json.prettyPrintTo(Serial);
+      json.printTo(configFile);
+      configFile.close();
+      //end save
+    }
+    delay(2000);
 
-  connectMqtt();
-
+  } else {
+    
+    /* Debug output
+    Serial.println("local ip");
+    Serial.println(WiFi.localIP());
+    Serial.println(WiFi.gatewayIP());
+    Serial.println(WiFi.subnetMask());
+  
+    Serial.println(mqtt_server);
+    Serial.println(mqtt_port);
+    Serial.println(mqtt_token);
+    Serial.println(sleep_seconds);
+    Serial.println(mqtt_channel_prefix);
+    */
+    
+    bme.begin(0x76);
+    
+    WiFi.forceSleepWake();
+    delay(1);
+    WiFi.mode( WIFI_STA );
+    WiFi.begin();
+    while(!WiFi.isConnected()) {
+       delay(100);
+       Serial.print(".");
+    }
+    connectMqtt();
+  
+    float voltage = ESP.getVcc() / 1024.00f;
+    char channel_name[80] ="";
+    
+    temperature = bme.readTemperature();
+    humidity = bme.readHumidity();
+    pressure = bme.readPressure() / 100.0F;
+    altitude = bme.readAltitude(SEALEVELPRESSURE_HPA);
+  
+    sprintf(channel_name, "%s/humidity", mqtt_channel_prefix);
+    do_post(channel_name, humidity);
+  
+    sprintf(channel_name, "%s/temperature", mqtt_channel_prefix);
+    do_post(channel_name, temperature);
+    
+    sprintf(channel_name, "%s/pressure", mqtt_channel_prefix);
+    do_post(channel_name, pressure);
+  
+    sprintf(channel_name, "%s/altitude", mqtt_channel_prefix);
+    do_post(channel_name, altitude);
+  
+    sprintf(channel_name, "%s/voltage", mqtt_channel_prefix);
+    do_post(channel_name, voltage);
+    
+    delay(20);
+    client.disconnect();
+  }
+  
+  Serial.println("And now sleep!");
+  ESP.deepSleep(atoi(sleep_seconds) * 1000000);
 }
 
-
+// resets all settings, for dev purposes
 void _resetSettings() {
   SPIFFS.begin();
   SPIFFS.format();
@@ -201,6 +238,7 @@ void _resetSettings() {
   ESP.reset();
 }
 
+// generates the id for MQTT
 const char * generateID()
 {
   randomSeed(analogRead(0));
@@ -213,10 +251,9 @@ const char * generateID()
   return id;
 }
 
+// handles the MQTT connection
 void connectMqtt() {
   client.setServer(strdup(mqtt_server), atoi(mqtt_port));
-  // no callback used
-  //client.setCallback(callback);
 
   while (!client.connected()) {
     Serial.println("Connecting to MQTT...");
@@ -233,6 +270,8 @@ void connectMqtt() {
     }
   }
 }
+
+// posts one message to MQTT
 void do_post(char* path, float val) {
 
   char v_str[10];
@@ -245,39 +284,9 @@ void do_post(char* path, float val) {
   Serial.print("* with value: *");
   Serial.print(message);
   Serial.println("*");
-  //client.loop();
-  //yield();
-  delay(1000); // for some reason this is required by the mqtt lib, otherwise only first val will be sent
 }
+
+
 void loop() {
-  
-  int tries = 0;
-  float voltage = ESP.getVcc() / 1024.00f;
-  char channel_name[80] ="";
-  
-  temperature = bme.readTemperature();
-  humidity = bme.readHumidity();
-  pressure = bme.readPressure() / 100.0F;
-  altitude = bme.readAltitude(SEALEVELPRESSURE_HPA);
-
-  sprintf(channel_name, "%s/humidity", mqtt_channel_prefix);
-  do_post(channel_name, humidity);
-
-  sprintf(channel_name, "%s/temperature", mqtt_channel_prefix);
-  do_post(channel_name, temperature);
-  
-  sprintf(channel_name, "%s/pressure", mqtt_channel_prefix);
-  do_post(channel_name, pressure);
-
-  sprintf(channel_name, "%s/altitude", mqtt_channel_prefix);
-  do_post(channel_name, altitude);
-
-  sprintf(channel_name, "%s/voltage", mqtt_channel_prefix);
-  do_post(channel_name, voltage);
-  
-  yield();
-  delay(1000);
-  Serial.println("And now sleep!");
-  ESP.deepSleep(atoi(sleep_seconds) * 1000000); // 120 sec sleep
-
+  // nothing to loop here
 }
